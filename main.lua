@@ -6,8 +6,12 @@ local physics = require("physics")
 -- ─── Constants ────────────────────────────────────────────────────────────────
 local W, H = display.contentWidth, display.contentHeight
 local GROUND_Y = H * 0.8
-local GRAVITY = -800
-local JUMP_FORCE = 480
+
+-- Solar 2D coordinate system: positive Y is DOWN (top-left origin).
+-- physics.setGravity uses the same axes, so gravity must be positive to pull down.
+local GRAVITY = 30          -- physics gravity units (≈ 800 px/s² after Box2D scaling)
+local JUMP_IMPULSE = -12    -- negative = upward (applied directly as physics impulse)
+
 local SCROLL_SPEED_INIT = 220   -- pixels / second
 local SCROLL_SPEED_MAX  = 420
 local SPEED_INCREMENT   = 5     -- added every second
@@ -41,7 +45,7 @@ end
 local function onCollision(event)
     if event.phase == "began" then
         local a, b = event.object1, event.object2
-        -- Player lands on platform
+        -- Player lands on platform/ground
         if (a == player and b.isGround) or (b == player and a.isGround) then
             isOnGround = true
         end
@@ -64,13 +68,14 @@ end
 -- ─── Platform factory ─────────────────────────────────────────────────────────
 local function spawnPlatform(x)
     local pw = math.random(120, 220)
-    local py = GROUND_Y - math.random(0, 60)   -- slight vertical variation
+    -- Platforms sit at or slightly above ground level; in Solar 2D lower Y = higher on screen
+    local py = GROUND_Y - math.random(0, 60)
     local plat = makeRect(gameGroup, x + pw / 2, py, pw, 14, 0.3, 0.8, 0.4)
     plat.isGround = true
     physics.addBody(plat, "static", { friction = 0.5, bounce = 0 })
     platforms[#platforms + 1] = plat
 
-    -- Optionally add an obstacle on top
+    -- Optionally add an obstacle on top (upward = smaller Y)
     if math.random() < OBSTACLE_CHANCE then
         local obs = makeRect(gameGroup, x + pw / 2, py - 24, 20, 30, 0.9, 0.25, 0.2)
         obs.isObstacle = true
@@ -93,13 +98,13 @@ function onEnterFrame(event)
 
     local dx = scrollSpeed * dt
 
-    -- Scroll ground
+    -- Scroll ground (wrap when it scrolls off the left)
     ground.x = ground.x - dx
     if ground.x < -ground.width / 2 + W then
         ground.x = ground.x + ground.width
     end
 
-    -- Scroll platforms and obstacles; remove if off-screen
+    -- Scroll platforms and obstacles; remove if off-screen left
     for i = #platforms, 1, -1 do
         local p = platforms[i]
         p.x = p.x - dx
@@ -117,7 +122,7 @@ function onEnterFrame(event)
         end
     end
 
-    -- Spawn new platforms
+    -- Spawn new platforms as they're needed on the right side
     nextPlatformX = nextPlatformX - dx
     if nextPlatformX < W + 20 then
         local gap = math.random(PLATFORM_GAP_MIN, PLATFORM_GAP_MAX)
@@ -125,40 +130,68 @@ function onEnterFrame(event)
         spawnPlatform(W + gap)
     end
 
-    -- Score
+    -- Score increases with survival time
     score = score + dt * 5
     scoreLabel.text = "Score: " .. math.floor(score)
 end
 
 -- ─── Input ────────────────────────────────────────────────────────────────────
 local function onTap()
-    if isGameOver then return end
+    if isGameOver then
+        -- Wire restart through a tiny delay to avoid double-event issues
+        timer.performWithDelay(1, function()
+            Runtime:removeEventListener("collision", onCollision)
+            Runtime:removeEventListener("enterFrame", onEnterFrame)
+            Runtime:removeEventListener("tap", onTap)
+
+            display.remove(bgGroup)
+            display.remove(gameGroup)
+            display.remove(uiGroup)
+            platforms = {}
+            obstacles = {}
+            scrollSpeed = SCROLL_SPEED_INIT
+            score = 0
+            isGameOver = false
+            isOnGround = false
+            nextPlatformX = W + 20
+            lastTime = system.getTimer()
+
+            buildScene()
+
+            Runtime:addEventListener("collision", onCollision)
+            Runtime:addEventListener("enterFrame", onEnterFrame)
+            Runtime:addEventListener("tap", onTap)
+        end)
+        return
+    end
+
+    -- Jump: only when touching ground; apply upward impulse (negative Y in Solar 2D)
     if isOnGround then
         isOnGround = false
-        player:applyLinearImpulse(0, player.mass * JUMP_FORCE / 60, player.x, player.y)
+        player:applyLinearImpulse(0, JUMP_IMPULSE, player.x, player.y)
     end
 end
 
 -- ─── Build scene ──────────────────────────────────────────────────────────────
-local function buildScene()
+function buildScene()
     bgGroup   = display.newGroup()
     gameGroup = display.newGroup()
     uiGroup   = display.newGroup()
 
     -- Sky background
-    local sky = makeRect(bgGroup, W / 2, H / 2, W, H, 0.12, 0.15, 0.25)
+    makeRect(bgGroup, W / 2, H / 2, W, H, 0.12, 0.15, 0.25)
 
     -- Scrolling ground (wide enough to wrap)
     ground = makeRect(gameGroup, W / 2, GROUND_Y + 20, W * 4, 40, 0.3, 0.65, 0.35)
     ground.isGround = true
     physics.addBody(ground, "static", { friction = 0.5, bounce = 0 })
 
-    -- Initial platform run
+    -- Initial platform run so player isn't immediately in the air
     spawnPlatform(0)
     spawnPlatform(300)
     spawnPlatform(560)
 
-    -- Player (simple square character)
+    -- Player (simple rectangle character)
     player = makeRect(gameGroup, W * 0.2, GROUND_Y - 60, 32, 44, 0.2, 0.6, 1.0)
     physics.addBody(player, { density = 1, friction = 0.3, bounce = 0 })
     player.isFixedRotation = true
@@ -180,34 +213,10 @@ local function buildScene()
     restartBtn.isVisible = false
 end
 
--- ─── Restart ──────────────────────────────────────────────────────────────────
-local function restart()
-    Runtime:removeEventListener("collision", onCollision)
-    Runtime:removeEventListener("enterFrame", onEnterFrame)
-    Runtime:removeEventListener("tap", onTap)
-
-    display.remove(bgGroup)
-    display.remove(gameGroup)
-    display.remove(uiGroup)
-    platforms = {}
-    obstacles = {}
-    scrollSpeed = SCROLL_SPEED_INIT
-    score = 0
-    isGameOver = false
-    isOnGround = false
-    nextPlatformX = W + 20
-    lastTime = system.getTimer()
-
-    buildScene()
-
-    Runtime:addEventListener("collision", onCollision)
-    Runtime:addEventListener("enterFrame", onEnterFrame)
-    Runtime:addEventListener("tap", onTap)
-end
-
 -- ─── Init ─────────────────────────────────────────────────────────────────────
 physics.start()
-physics.setGravity(0, GRAVITY / 60)
+-- Positive Y = downward in Solar 2D's top-left coordinate system
+physics.setGravity(0, GRAVITY)
 
 buildScene()
 
