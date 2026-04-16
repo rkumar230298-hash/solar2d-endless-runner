@@ -1,0 +1,6 @@
+*.apk
+*.ipa
+*.aab
+build/
+*.tmp
+.DS_Store
